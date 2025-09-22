@@ -1,7 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
-import { db } from '@/lib/database'
-import { cache } from '@/lib/cache'
 import { Monitor, MetricType } from '@/lib/monitoring'
 import { successResponse, handleError, methodNotAllowed, createPerformanceLogger } from '@/lib/api-utils'
 
@@ -24,6 +21,8 @@ export async function GET(request: NextRequest) {
 
     // Enhanced database health check
     try {
+      const { db } = await import('@/lib/database');
+      const { prisma } = await import('@/lib/prisma');
       const dbHealth = await db.health();
       health.checks.database = {
         status: dbHealth.status,
@@ -69,6 +68,7 @@ export async function GET(request: NextRequest) {
 
     // Cache health check
     try {
+      const { cache } = await import('@/lib/cache');
       const cacheStats = cache.getStats();
       health.checks.cache = {
         status: 'healthy',
@@ -108,6 +108,7 @@ export async function GET(request: NextRequest) {
 
       // Database connection pool stats
       try {
+        const { db } = await import('@/lib/database');
         const poolStats = await db.getPoolStats();
         if (poolStats) {
           health.checks.connectionPool = {
