@@ -1,0 +1,359 @@
+name: Production Deployment Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '18'
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+jobs:
+  # Code Quality and Security Checks
+  quality-checks:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type checking
+        run: npm run type-check
+
+      - name: Lint code
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Security audit
+        run: npm audit --audit-level=moderate
+
+      - name: License check
+        run: npx license-checker --production --onlyAllow 'MIT;Apache-2.0;BSD-3-Clause;BSD-2-Clause;ISC'
+
+  # Database and Backend Tests
+  backend-tests:
+    name: Backend & Database Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: crm_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup test database
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/crm_test
+          DIRECT_URL: postgresql://postgres:test@localhost:5432/crm_test
+        run: |
+          npx prisma migrate deploy
+          npx prisma db seed
+
+      - name: Run backend tests
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/crm_test
+          DIRECT_URL: postgresql://postgres:test@localhost:5432/crm_test
+          JWT_SECRET: test-jwt-secret
+          NEXTAUTH_SECRET: test-nextauth-secret
+        run: npm run test:backend
+
+      - name: Database migration test
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/crm_test
+          DIRECT_URL: postgresql://postgres:test@localhost:5432/crm_test
+        run: |
+          npx prisma migrate reset --force
+          npx prisma migrate deploy
+          node scripts/database-migration.js
+
+  # Frontend Tests
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm run test:frontend
+
+      - name: Component tests with coverage
+        run: npm run test:components -- --coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage/lcov.info
+          flags: frontend
+
+  # End-to-End Tests
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Build application
+        run: npm run build
+
+      - name: Start application
+        run: npm start &
+        env:
+          PORT: 3000
+
+      - name: Wait for app to be ready
+        run: npx wait-on http://localhost:3000
+
+      - name: Run E2E tests
+        run: npm run test:e2e
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  # Performance Tests
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Lighthouse CI
+        run: |
+          npm install -g @lhci/cli@0.12.x
+          lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+
+      - name: Bundle size analysis
+        run: npm run analyze:bundle
+
+  # Security Scanning
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.7.0
+        with:
+          target: 'http://localhost:3000'
+          fail_action: false
+
+  # Preview Deployment (PR only)
+  preview-deploy:
+    name: Preview Deployment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: [quality-checks, backend-tests, frontend-tests]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel Environment Information
+        run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build Project Artifacts
+        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy to Vercel Preview
+        id: deploy
+        run: |
+          url=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+          echo "preview_url=$url" >> $GITHUB_OUTPUT
+
+      - name: Comment Preview URL
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 Preview deployment ready! [View Preview](${{ steps.deploy.outputs.preview_url }})`
+            })
+
+  # Production Deployment (main branch only)
+  production-deploy:
+    name: Production Deployment
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [quality-checks, backend-tests, frontend-tests, e2e-tests, performance-tests, security-scan]
+    environment:
+      name: production
+      url: https://your-domain.vercel.app
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel Environment Information
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build Project Artifacts
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy to Vercel Production
+        id: deploy
+        run: |
+          url=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          echo "production_url=$url" >> $GITHUB_OUTPUT
+
+      - name: Run Database Migrations
+        run: |
+          npm ci
+          npm run migrate:deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+
+      - name: Health Check
+        run: |
+          sleep 30
+          curl -f ${{ steps.deploy.outputs.production_url }}/health || exit 1
+
+      - name: Notify Deployment Success
+        uses: 8398a7/action-slack@v3
+        if: success()
+        with:
+          status: success
+          channel: '#deployments'
+          text: '🚀 CRM Production deployment successful!'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Deployment Failure
+        uses: 8398a7/action-slack@v3
+        if: failure()
+        with:
+          status: failure
+          channel: '#deployments'
+          text: '❌ CRM Production deployment failed!'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Post-deployment verification
+  post-deploy-verification:
+    name: Post-deployment Verification
+    runs-on: ubuntu-latest
+    needs: [production-deploy]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Smoke tests
+        run: npm run test:smoke
+        env:
+          SMOKE_TEST_URL: https://your-domain.vercel.app
+
+      - name: Performance monitoring
+        run: |
+          npm install -g lighthouse
+          lighthouse https://your-domain.vercel.app --output=json --output-path=./lighthouse-report.json
+          node scripts/performance-check.js
+
+      - name: Security headers check
+        run: |
+          curl -I https://your-domain.vercel.app | grep -E "(X-Frame-Options|X-Content-Type-Options|Strict-Transport-Security)"

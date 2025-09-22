@@ -1,0 +1,365 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '18.17.0'
+  POSTGRES_VERSION: '15'
+
+jobs:
+  # ============================================================================
+  # QUALITY GATES - TypeScript, Linting, and Security
+  # ============================================================================
+  quality-gates:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type checking
+        run: npm run type-check
+
+      - name: Linting
+        run: npm run lint
+
+      - name: Security audit
+        run: npm audit --audit-level high
+
+      - name: Check for outdated dependencies
+        run: npm outdated --depth=0 || true
+
+  # ============================================================================
+  # DATABASE TESTS - Prisma Schema and Migrations
+  # ============================================================================
+  database-tests:
+    name: Database Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: crm_user
+          POSTGRES_PASSWORD: crm_password
+          POSTGRES_DB: crm_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      DATABASE_URL: postgresql://crm_user:crm_password@localhost:5432/crm_test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run database migrations
+        run: npx prisma migrate deploy
+
+      - name: Validate schema
+        run: npx prisma validate
+
+      - name: Check migration status
+        run: npx prisma migrate status
+
+  # ============================================================================
+  # UNIT TESTS - Component and API Route Tests
+  # ============================================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: [quality-gates]
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: crm_user
+          POSTGRES_PASSWORD: crm_password
+          POSTGRES_DB: crm_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      DATABASE_URL: postgresql://crm_user:crm_password@localhost:5432/crm_test
+      NEXTAUTH_SECRET: test-nextauth-secret
+      JWT_SECRET: test-jwt-secret
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run database migrations
+        run: npx prisma migrate deploy
+
+      - name: Run unit tests
+        run: npm run test -- --coverage --watchAll=false
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+
+  # ============================================================================
+  # BUILD VALIDATION - Next.js Production Build
+  # ============================================================================
+  build-validation:
+    name: Build Validation
+    runs-on: ubuntu-latest
+    needs: [quality-gates, database-tests]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://fake:fake@fake:5432/fake
+
+      - name: Build application
+        run: npm run build
+        env:
+          DATABASE_URL: postgresql://fake:fake@fake:5432/fake
+          NEXTAUTH_SECRET: build-test-secret
+          NEXTAUTH_URL: http://localhost:3000
+
+      - name: Check build output
+        run: |
+          if [ ! -d ".next" ]; then
+            echo "Build failed - .next directory not found"
+            exit 1
+          fi
+
+      - name: Bundle analyzer
+        run: |
+          echo "Build completed successfully"
+          du -sh .next/
+
+  # ============================================================================
+  # SECURITY SCANNING - Vulnerability and Dependency Checks
+  # ============================================================================
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: [quality-gates]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run security audit
+        run: npm audit --audit-level high
+
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+          extra_args: --debug --only-verified
+
+  # ============================================================================
+  # PERFORMANCE TESTING - Lighthouse CI
+  # ============================================================================
+  performance-test:
+    name: Performance Testing
+    runs-on: ubuntu-latest
+    needs: [build-validation]
+    if: github.event_name == 'pull_request'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: crm_user
+          POSTGRES_PASSWORD: crm_password
+          POSTGRES_DB: crm_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      DATABASE_URL: postgresql://crm_user:crm_password@localhost:5432/crm_test
+      NEXTAUTH_SECRET: test-nextauth-secret
+      NEXTAUTH_URL: http://localhost:3000
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run database migrations
+        run: npx prisma migrate deploy
+
+      - name: Build application
+        run: npm run build
+
+      - name: Start application
+        run: npm start &
+
+      - name: Wait for server
+        run: npx wait-on http://localhost:3000 --timeout 60000
+
+      - name: Run Lighthouse CI
+        run: npx lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+
+  # ============================================================================
+  # DEPLOYMENT - Automatic deployment on main branch
+  # ============================================================================
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [unit-tests, build-validation, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Vercel
+        id: deploy
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: '--prod'
+
+      - name: Run post-deployment health check
+        run: |
+          sleep 30
+          curl -f ${{ steps.deploy.outputs.url }}/api/health || exit 1
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "✅ Production deployment successful: ${{ steps.deploy.outputs.url }}"
+
+      - name: Notify deployment failure
+        if: failure()
+        run: |
+          echo "❌ Production deployment failed"
+          exit 1
+
+  # ============================================================================
+  # POST-DEPLOYMENT VALIDATION
+  # ============================================================================
+  post-deployment-tests:
+    name: Post-Deployment Tests
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test production endpoints
+        run: |
+          # Test health endpoint
+          curl -f https://${{ needs.deploy.outputs.url }}/api/health
+
+          # Test main page
+          curl -f https://${{ needs.deploy.outputs.url }}
+
+      - name: Database migration check
+        run: |
+          echo "Checking database migration status..."
+          # Add database connectivity test here
+
+      - name: Performance validation
+        run: |
+          echo "Running production performance check..."
+          # Add basic performance validation

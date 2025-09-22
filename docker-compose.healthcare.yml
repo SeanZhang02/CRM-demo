@@ -1,0 +1,276 @@
+# HIPAA-Compliant Healthcare Infrastructure Docker Compose
+# Production-ready configuration for APCTC Healthcare Provider Portal
+version: '3.8'
+
+services:
+  # PostgreSQL Database with Healthcare Encryption
+  postgres-healthcare:
+    image: postgres:15-alpine
+    container_name: apctc-postgres-healthcare
+    restart: always
+    environment:
+      POSTGRES_DB: apctc_healthcare
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST_AUTH_METHOD: md5
+      # Healthcare-specific configurations
+      POSTGRES_INITDB_ARGS: "--auth=md5 --encoding=UTF8 --locale=en_US.UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_healthcare_data:/var/lib/postgresql/data
+      - ./database/healthcare-init:/docker-entrypoint-initdb.d
+      - ./database/healthcare-config/postgresql.conf:/etc/postgresql/postgresql.conf
+    command: >
+      postgres
+      -c ssl=on
+      -c ssl_cert_file=/etc/ssl/certs/server.crt
+      -c ssl_key_file=/etc/ssl/private/server.key
+      -c log_statement=all
+      -c log_connections=on
+      -c log_disconnections=on
+      -c log_duration=on
+      -c shared_preload_libraries=pg_stat_statements
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d apctc_healthcare"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - healthcare-secure-network
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+
+  # Redis for Healthcare Sessions with Encryption
+  redis-healthcare:
+    image: redis:7-alpine
+    container_name: apctc-redis-healthcare
+    restart: always
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_healthcare_data:/data
+      - ./redis/healthcare-config/redis.conf:/usr/local/etc/redis/redis.conf
+    command: >
+      redis-server /usr/local/etc/redis/redis.conf
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --tcp-keepalive 300
+      --timeout 0
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - healthcare-secure-network
+    security_opt:
+      - no-new-privileges:true
+
+  # Healthcare Application Container
+  apctc-healthcare-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.healthcare
+      args:
+        NODE_ENV: production
+        HIPAA_COMPLIANCE: "true"
+    container_name: apctc-healthcare-app
+    restart: always
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://redis-healthcare:6379
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      PHI_ENCRYPTION_KEY: ${PHI_ENCRYPTION_KEY}
+      AUDIT_LOG_LEVEL: "INFO"
+      HIPAA_COMPLIANCE: "true"
+      APCTC_LOCATION_ID: ${APCTC_LOCATION_ID}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres-healthcare:
+        condition: service_healthy
+      redis-healthcare:
+        condition: service_healthy
+    volumes:
+      - ./logs/healthcare:/app/logs
+      - ./uploads/healthcare:/app/uploads
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - healthcare-secure-network
+    security_opt:
+      - no-new-privileges:true
+    user: "1001:1001"
+
+  # Healthcare API Gateway
+  healthcare-api-gateway:
+    image: nginx:alpine
+    container_name: apctc-api-gateway
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/healthcare.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl/healthcare:/etc/ssl/healthcare:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - apctc-healthcare-app
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - healthcare-secure-network
+    security_opt:
+      - no-new-privileges:true
+
+  # Healthcare Audit Log Aggregator
+  healthcare-audit-logs:
+    image: fluentd:v1.16-debian-1
+    container_name: apctc-audit-logs
+    restart: always
+    environment:
+      FLUENTD_CONF: fluent.conf
+      AUDIT_LOG_RETENTION: "7years"
+    volumes:
+      - ./fluentd/healthcare.conf:/fluentd/etc/fluent.conf:ro
+      - ./logs/healthcare:/fluentd/log/healthcare
+      - ./logs/audit:/fluentd/log/audit
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+    networks:
+      - healthcare-secure-network
+    security_opt:
+      - no-new-privileges:true
+
+  # Healthcare Monitoring Agent
+  healthcare-monitoring:
+    image: prom/node-exporter:latest
+    container_name: apctc-monitoring
+    restart: always
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--web.listen-address=:9100'
+    networks:
+      - healthcare-secure-network
+    security_opt:
+      - no-new-privileges:true
+
+  # Healthcare Backup Service
+  healthcare-backup:
+    image: postgres:15-alpine
+    container_name: apctc-backup-service
+    restart: "no"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_RETENTION_DAYS: 2555  # 7 years
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY}
+    volumes:
+      - ./backups/healthcare:/backups
+      - ./scripts/healthcare-backup.sh:/backup.sh:ro
+    command: ["sh", "/backup.sh"]
+    depends_on:
+      postgres-healthcare:
+        condition: service_healthy
+    networks:
+      - healthcare-secure-network
+    security_opt:
+      - no-new-privileges:true
+
+  # Healthcare Compliance Scanner
+  compliance-scanner:
+    build:
+      context: ./security/compliance-scanner
+      dockerfile: Dockerfile
+    container_name: apctc-compliance-scanner
+    restart: always
+    environment:
+      SCAN_INTERVAL: "3600"  # 1 hour
+      HIPAA_RULES_PATH: "/rules/hipaa.yml"
+      COMPLIANCE_REPORT_PATH: "/reports"
+    volumes:
+      - ./security/compliance-rules:/rules:ro
+      - ./reports/compliance:/reports
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - healthcare-secure-network
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_healthcare_data:
+    driver: local
+    driver_opts:
+      type: "none"
+      o: "bind"
+      device: "${HEALTHCARE_DATA_PATH}/postgres"
+
+  redis_healthcare_data:
+    driver: local
+    driver_opts:
+      type: "none"
+      o: "bind"
+      device: "${HEALTHCARE_DATA_PATH}/redis"
+
+networks:
+  healthcare-secure-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
+
+# Healthcare-specific configurations
+configs:
+  healthcare_ssl_cert:
+    file: ./ssl/healthcare/server.crt
+  healthcare_ssl_key:
+    file: ./ssl/healthcare/server.key
+  hipaa_compliance_rules:
+    file: ./security/hipaa-compliance.yml
+
+secrets:
+  postgres_password:
+    environment: "POSTGRES_PASSWORD"
+  redis_password:
+    environment: "REDIS_PASSWORD"
+  phi_encryption_key:
+    environment: "PHI_ENCRYPTION_KEY"
+  backup_encryption_key:
+    environment: "BACKUP_ENCRYPTION_KEY"

@@ -1,0 +1,134 @@
+# Multi-stage HIPAA-compliant Docker build for APCTC Healthcare Portal
+# Optimized for security, performance, and compliance
+
+# Stage 1: Dependencies and Build
+FROM node:18-alpine AS healthcare-base
+LABEL maintainer="APCTC DevOps Team <devops@apctc.org>"
+LABEL version="1.0.0"
+LABEL description="HIPAA-compliant healthcare provider portal"
+LABEL compliance="HIPAA, SOC 2 Type II"
+
+# Security hardening
+RUN addgroup -g 1001 -S healthcare && \
+    adduser -S healthcare -u 1001 -G healthcare
+
+# Install security updates and required packages
+RUN apk update && \
+    apk add --no-cache \
+    dumb-init \
+    openssl \
+    ca-certificates \
+    curl \
+    && rm -rf /var/cache/apk/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY prisma ./prisma/
+
+# Install dependencies with audit
+RUN npm ci --only=production --audit && \
+    npm cache clean --force
+
+# Stage 2: Healthcare Application Build
+FROM healthcare-base AS healthcare-builder
+
+# Copy source code
+COPY . .
+
+# Build application with healthcare-specific configurations
+ENV NODE_ENV=production
+ENV HIPAA_COMPLIANCE=true
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Install build dependencies
+RUN npm ci --include=dev
+
+# Generate Prisma client for healthcare schema
+RUN npx prisma generate
+
+# Build Next.js application
+RUN npm run build
+
+# Remove development dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Stage 3: Production Healthcare Image
+FROM node:18-alpine AS healthcare-production
+
+# Security labels
+LABEL security.scan.enabled="true"
+LABEL security.hipaa.compliant="true"
+LABEL security.phi.encryption="true"
+
+# Create healthcare user
+RUN addgroup -g 1001 -S healthcare && \
+    adduser -S healthcare -u 1001 -G healthcare
+
+# Install runtime security packages
+RUN apk update && \
+    apk add --no-cache \
+    dumb-init \
+    openssl \
+    ca-certificates \
+    curl \
+    tini \
+    && rm -rf /var/cache/apk/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy built application from builder
+COPY --from=healthcare-builder --chown=healthcare:healthcare /app/node_modules ./node_modules
+COPY --from=healthcare-builder --chown=healthcare:healthcare /app/.next ./.next
+COPY --from=healthcare-builder --chown=healthcare:healthcare /app/public ./public
+COPY --from=healthcare-builder --chown=healthcare:healthcare /app/package*.json ./
+COPY --from=healthcare-builder --chown=healthcare:healthcare /app/prisma ./prisma
+COPY --from=healthcare-builder --chown=healthcare:healthcare /app/next.config.ts ./
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/logs /app/uploads /app/temp && \
+    chown -R healthcare:healthcare /app && \
+    chmod -R 755 /app && \
+    chmod -R 700 /app/logs /app/uploads /app/temp
+
+# Healthcare-specific environment variables
+ENV NODE_ENV=production
+ENV HIPAA_COMPLIANCE=true
+ENV PHI_ENCRYPTION_ENABLED=true
+ENV AUDIT_LOGGING_ENABLED=true
+ENV SECURE_COOKIES=true
+ENV FORCE_HTTPS=true
+ENV SESSION_TIMEOUT=900
+ENV MAX_SESSION_DURATION=28800
+ENV CONTENT_SECURITY_POLICY=strict
+
+# Security configurations
+ENV DISABLE_SOURCEMAPS=true
+ENV HIDE_POWERED_BY=true
+ENV TRUST_PROXY=1
+
+# Health check configuration
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:3000/api/health || exit 1
+
+# Switch to non-root user
+USER healthcare
+
+# Expose application port
+EXPOSE 3000
+
+# Use tini for proper signal handling
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# Start application
+CMD ["npm", "start"]
+
+# Security annotations
+LABEL security.scan.options="--severity HIGH,CRITICAL"
+LABEL security.runtime.readonly="true"
+LABEL security.runtime.user="1001"
+LABEL security.runtime.capabilities.drop="ALL"
+LABEL security.runtime.no-new-privileges="true"

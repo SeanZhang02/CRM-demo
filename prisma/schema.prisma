@@ -1,0 +1,996 @@
+// This is your Prisma schema file
+// Learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// HEALTHCARE ENTITIES SCHEMA - APCTC TRANSFORMATION
+//
+// Architecture: Patients → Family_Members → Treatment_Plans → Service_Episodes hierarchy
+// Design: Button-based navigation optimized for medical professionals
+// Performance: <100ms query targets with strategic indexing
+// Compliance: HIPAA audit logging and field-level access controls
+// ============================================================================
+
+// ============================================================================
+// PATIENTS (Transformed from Companies)
+// Core healthcare entity - individual patients receiving care
+// ============================================================================
+model Patient {
+  id                      String   @id @default(uuid())
+  // Basic Demographics
+  firstName               String
+  lastName                String
+  dateOfBirth             DateTime?
+  gender                  Gender?
+  preferredLanguage       String?  @default("English")
+
+  // Contact Information (from original Company fields)
+  phone                   String?
+  email                   String?
+  address                 String?
+  city                    String?
+  state                   String?
+  postalCode              String?
+  country                 String?  @default("USA")
+
+  // Healthcare-Specific Fields
+  medicalRecordNumber     String?  @unique
+  primaryDiagnosis        String?
+  insuranceProvider       String?
+  insurancePolicyNumber   String?
+  emergencyContactId      String?
+  currentProviderId       String?
+  locationId              String   // APCTC center assignment
+
+  // Patient Status and Care Management
+  patientStatus           PatientStatus @default(ACTIVE)
+  riskLevel               RiskLevel @default(LOW)
+  consentOnFile           Boolean  @default(false)
+  hipaaAuthorizationDate  DateTime?
+
+  // Soft delete and audit trail
+  isDeleted               Boolean  @default(false)
+  deletedAt               DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // User who owns this patient record (for multi-user data isolation)
+  ownerId                 String?
+  owner                   User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  // Healthcare Relationships - Patients are the root of the hierarchy
+  familyMembers           FamilyMember[]
+  treatmentPlans          TreatmentPlan[]
+  serviceEpisodes         ServiceEpisode[]
+  appointments            Appointment[]
+  customFields            PatientCustomField[]
+  auditLogs               AuditLog[]
+
+  // Foreign Key Relationships
+  location                Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  currentProvider         Provider? @relation(fields: [currentProviderId], references: [id], onDelete: SetNull)
+  emergencyContact        FamilyMember? @relation("EmergencyContact", fields: [emergencyContactId], references: [id], onDelete: SetNull)
+
+  // Indexes for performance optimization (patient search <100ms)
+  @@index([firstName, lastName]) // Fast patient name searches
+  @@index([medicalRecordNumber]) // Medical record lookup
+  @@index([patientStatus]) // Status filtering
+  @@index([locationId]) // Location-based filtering
+  @@index([preferredLanguage]) // Language-based filtering
+  @@index([currentProviderId]) // Provider caseload queries
+  @@index([ownerId]) // User data isolation
+  @@index([isDeleted]) // Exclude soft-deleted records
+  @@index([createdAt]) // Chronological sorting
+  @@map("patients")
+}
+
+// ============================================================================
+// FAMILY MEMBERS (Transformed from Contacts)
+// Emergency contacts, guardians, and family members for patients
+// ============================================================================
+model FamilyMember {
+  id                      String   @id @default(uuid())
+  firstName               String
+  lastName                String
+  email                   String?
+  phone                   String?
+  mobilePhone             String?
+
+  // Healthcare-Specific Fields
+  relationshipType        RelationshipType
+  isEmergencyContact      Boolean  @default(false)
+  isPrimaryContact        Boolean  @default(false)
+  canAccessInformation    Boolean  @default(false)
+  preferredContactMethod  ContactMethod @default(PHONE)
+
+  // Contact preferences and status
+  status                  ContactStatus @default(ACTIVE)
+
+  // Additional contact details
+  address                 String?
+  city                    String?
+  state                   String?
+  postalCode              String?
+  notes                   String?
+
+  // Soft delete and audit trail
+  isDeleted               Boolean  @default(false)
+  deletedAt               DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // Foreign key relationship to Patient
+  patientId               String?
+  patient                 Patient? @relation(fields: [patientId], references: [id], onDelete: SetNull)
+
+  // User ownership for data isolation
+  ownerId                 String?
+  owner                   User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  // Relationships
+  serviceEpisodes         ServiceEpisode[]
+  customFields            FamilyMemberCustomField[]
+
+  // Emergency contact relationships
+  emergencyForPatients    Patient[] @relation("EmergencyContact")
+
+  // Unique constraints and indexes
+  @@index([patientId]) // Patient → family members navigation
+  @@index([firstName, lastName]) // Name-based searches
+  @@index([isEmergencyContact]) // Emergency contact filtering
+  @@index([relationshipType]) // Relationship filtering
+  @@index([status]) // Status filtering
+  @@index([ownerId]) // User data isolation
+  @@index([isDeleted]) // Exclude soft-deleted records
+  @@map("family_members")
+}
+
+// ============================================================================
+// TREATMENT PLANS (Transformed from Deals)
+// Long-term care coordination and treatment planning
+// ============================================================================
+model TreatmentPlan {
+  id                      String   @id @default(uuid())
+  title                   String
+  description             String?
+
+  // Treatment Planning Details
+  treatmentType           TreatmentType
+  primaryDiagnosis        String?
+  secondaryDiagnoses      String? // JSON array as string
+  treatmentGoals          String? // JSON array as string
+
+  // Timeline and Progress
+  startDate               DateTime
+  reviewDate              DateTime?
+  endDate                 DateTime?
+  expectedDuration        Int?     // Duration in weeks
+
+  // Treatment coordination
+  status                  TreatmentStatus @default(ACTIVE)
+  priority                Priority @default(MEDIUM)
+
+  // Insurance and Authorization
+  insuranceAuthorization  String?
+  sessionsAuthorized      Int?
+  sessionsCompleted       Int?     @default(0)
+  sessionsRemaining       Int?
+
+  // Progress tracking
+  progressNotes           String?
+  outcomesMeasures        String? // JSON structured data
+
+  // Soft delete and audit trail
+  isDeleted               Boolean  @default(false)
+  deletedAt               DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // Foreign key relationships
+  patientId               String?
+  patient                 Patient? @relation(fields: [patientId], references: [id], onDelete: SetNull)
+
+  primaryProviderId       String?
+  primaryProvider         Provider? @relation(fields: [primaryProviderId], references: [id], onDelete: SetNull)
+
+  // User ownership for data isolation
+  ownerId                 String?
+  owner                   User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  // Relationships
+  serviceEpisodes         ServiceEpisode[]
+  customFields            TreatmentPlanCustomField[]
+
+  // Performance indexes
+  @@index([patientId]) // Patient → treatment plans navigation
+  @@index([status]) // Treatment status filtering
+  @@index([treatmentType]) // Treatment type filtering
+  @@index([startDate]) // Date-based filtering and reporting
+  @@index([primaryProviderId]) // Provider caseload management
+  @@index([ownerId]) // User data isolation
+  @@index([isDeleted]) // Exclude soft-deleted records
+  @@index([createdAt]) // Chronological sorting
+  @@map("treatment_plans")
+}
+
+// ============================================================================
+// SERVICE EPISODES (Transformed from Activities)
+// Individual sessions and interactions in healthcare delivery
+// ============================================================================
+model ServiceEpisode {
+  id                      String   @id @default(uuid())
+
+  // Session Details
+  sessionType             ServiceType
+  subject                 String
+  sessionNotes            String?
+
+  // Scheduling and completion
+  scheduledDate           DateTime?
+  actualStartTime         DateTime?
+  actualEndTime           DateTime?
+  durationMinutes         Int?
+
+  // Episode status and priority
+  status                  EpisodeStatus @default(SCHEDULED)
+  priority                Priority @default(MEDIUM)
+
+  // Location and delivery method
+  deliveryMethod          DeliveryMethod @default(IN_PERSON)
+  locationId              String?
+  meetingUrl              String?
+  roomNumber              String?
+
+  // Clinical and billing information
+  billingCode             String?
+  serviceUnits            Float?   @default(1.0)
+  sessionOutcome          String?
+  nextSessionRecommendation String?
+
+  // Soft delete and audit trail
+  isDeleted               Boolean  @default(false)
+  deletedAt               DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // Foreign key relationships - Episodes can be associated with multiple entities
+  patientId               String?
+  patient                 Patient? @relation(fields: [patientId], references: [id], onDelete: SetNull)
+
+  familyMemberId          String?
+  familyMember            FamilyMember? @relation(fields: [familyMemberId], references: [id], onDelete: SetNull)
+
+  treatmentPlanId         String?
+  treatmentPlan           TreatmentPlan? @relation(fields: [treatmentPlanId], references: [id], onDelete: SetNull)
+
+  providerId              String?
+  provider                Provider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+
+  locationService         Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  // User ownership and assignment
+  ownerId                 String?
+  owner                   User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  // Performance indexes for episode management
+  @@index([sessionType]) // Service type filtering
+  @@index([status]) // Status-based filtering
+  @@index([scheduledDate]) // Calendar and scheduling views
+  @@index([patientId]) // Patient episode timeline
+  @@index([treatmentPlanId]) // Treatment plan progress tracking
+  @@index([providerId]) // Provider's schedule and caseload
+  @@index([locationId]) // Location-based scheduling
+  @@index([ownerId]) // User's episodes
+  @@index([isDeleted]) // Exclude soft-deleted records
+  @@index([createdAt]) // Chronological episode feed
+  @@map("service_episodes")
+}
+
+// ============================================================================
+// HEALTHCARE LOCATIONS
+// APCTC centers and service delivery locations
+// ============================================================================
+model Location {
+  id                      String   @id @default(uuid())
+  name                    String
+  shortName               String?  // For UI display
+  address                 String?
+  city                    String?
+  state                   String?
+  postalCode              String?
+  phone                   String?
+  email                   String?
+
+  // Location details
+  locationType            LocationType @default(MAIN_CENTER)
+  servicesOffered         String?  // JSON array of service types
+  operatingHours          String?  // JSON structured hours
+  languagesSupported      String?  // JSON array of languages
+  isActive                Boolean  @default(true)
+
+  // Capacity and resources
+  maxConcurrentPatients   Int?     @default(50)
+  availableRooms          Int?
+  teleHealthCapable       Boolean  @default(true)
+
+  // Audit trail
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // Relationships
+  patients                Patient[]
+  providers               Provider[]
+  serviceEpisodes         ServiceEpisode[]
+  appointments            Appointment[]
+
+  // Indexes for multi-site operations
+  @@index([isActive]) // Active locations
+  @@index([locationType]) // Location type filtering
+  @@index([name]) // Location search
+  @@map("locations")
+}
+
+// ============================================================================
+// HEALTHCARE PROVIDERS
+// Medical professionals and staff delivering services
+// ============================================================================
+model Provider {
+  id                      String   @id @default(uuid())
+
+  // Provider identification
+  employeeId              String?  @unique
+  licenseNumber           String?
+  licenseType             String?
+  specialty               String?
+
+  // Professional details
+  title                   String?  // Dr., LCSW, etc.
+  credentials             String?  // PhD, LMFT, etc.
+  languagesSpoken         String?  // JSON array
+  culturalCompetencies    String?  // JSON array
+
+  // Service delivery capabilities
+  canPrescribeMedication  Boolean  @default(false)
+  serviceTypesProvided    String?  // JSON array of service types
+  ageGroupsServed         String?  // JSON array (children, youth, adults, seniors)
+
+  // Caseload and scheduling
+  maxCaseload             Int?     @default(100)
+  currentCaseload         Int?     @default(0)
+  isAcceptingPatients     Boolean  @default(true)
+  workSchedule            String?  // JSON structured schedule
+
+  // Location assignments
+  primaryLocationId       String?
+  primaryLocation         Location? @relation(fields: [primaryLocationId], references: [id], onDelete: SetNull)
+
+  // Employment status
+  employmentStatus        EmploymentStatus @default(ACTIVE)
+  startDate               DateTime?
+  endDate                 DateTime?
+
+  // Audit trail
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // User account relationship
+  userId                  String?  @unique
+  user                    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Healthcare relationships
+  patients                Patient[]
+  treatmentPlans          TreatmentPlan[]
+  serviceEpisodes         ServiceEpisode[]
+  appointments            Appointment[]
+
+  // Indexes for provider management
+  @@index([specialty]) // Specialty-based searches
+  @@index([primaryLocationId]) // Location-based provider lists
+  @@index([isAcceptingPatients]) // Patient assignment queries
+  @@index([employmentStatus]) // Active provider filtering
+  @@index([licenseNumber]) // License verification
+  @@map("providers")
+}
+
+// ============================================================================
+// APPOINTMENTS
+// Enhanced scheduling system for healthcare services
+// ============================================================================
+model Appointment {
+  id                      String   @id @default(uuid())
+
+  // Appointment details
+  scheduledDate           DateTime
+  scheduledTime           String   // Time in HH:MM format
+  durationMinutes         Int      @default(60)
+
+  // Appointment classification
+  appointmentType         AppointmentType
+  urgency                 Priority @default(MEDIUM)
+  isRecurring             Boolean  @default(false)
+  recurringPattern        String?  // JSON structure for recurring appointments
+
+  // Status and logistics
+  status                  AppointmentStatus @default(SCHEDULED)
+  deliveryMethod          DeliveryMethod @default(IN_PERSON)
+  confirmationStatus      ConfirmationStatus @default(PENDING)
+
+  // Reminders and notifications
+  remindersSent           String?  // JSON array of reminder timestamps
+  lastReminderSent        DateTime?
+
+  // Session information
+  roomNumber              String?
+  meetingUrl              String?
+  specialInstructions     String?
+
+  // No-show and cancellation tracking
+  noShowReason            String?
+  cancellationReason      String?
+  rescheduledFromId       String?  // References another appointment
+  rescheduledToId         String?  // References another appointment
+
+  // Audit trail
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // Foreign key relationships
+  patientId               String
+  patient                 Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  providerId              String
+  provider                Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  locationId              String
+  location                Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  // Indexes for scheduling performance
+  @@index([scheduledDate]) // Calendar views
+  @@index([patientId]) // Patient appointment history
+  @@index([providerId]) // Provider schedule
+  @@index([locationId]) // Location scheduling
+  @@index([status]) // Status-based filtering
+  @@index([appointmentType]) // Appointment type filtering
+  @@map("appointments")
+}
+
+// ============================================================================
+// HIPAA AUDIT LOG
+// Comprehensive logging for compliance and security
+// ============================================================================
+model AuditLog {
+  id                      String   @id @default(uuid())
+
+  // Action details
+  action                  AuditAction
+  tableName               String?
+  recordId                String?
+  fieldName               String?  // For field-level tracking
+
+  // User and session information
+  userId                  String?
+  userEmail               String?
+  sessionId               String?
+  ipAddress               String?
+  userAgent               String?
+
+  // Data changes
+  oldValues               String?  // JSON string of previous values
+  newValues               String?  // JSON string of new values
+
+  // Context information
+  patientId               String?  // For patient-related actions
+  reason                  String?  // Business reason for access
+  accessType              AccessType
+
+  // Compliance tracking
+  hipaaJustification      String?
+  supervisorApproval      String?
+  auditReviewStatus       AuditReviewStatus @default(PENDING)
+
+  // Timestamp
+  timestamp               DateTime @default(now())
+
+  // Foreign key relationships
+  user                    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  patient                 Patient? @relation(fields: [patientId], references: [id], onDelete: SetNull)
+
+  // Indexes for audit queries and compliance reporting
+  @@index([userId]) // User activity tracking
+  @@index([patientId]) // Patient access audit
+  @@index([action]) // Action-based filtering
+  @@index([tableName]) // Table-specific audits
+  @@index([timestamp]) // Time-based audit reports
+  @@index([accessType]) // Access type analysis
+  @@map("audit_log")
+}
+
+// ============================================================================
+// USERS (Enhanced for Healthcare)
+// System users with healthcare-specific roles and permissions
+// ============================================================================
+model User {
+  id                      String   @id @default(uuid())
+  email                   String   @unique
+  name                    String?
+  firstName               String?
+  lastName                String?
+
+  // Authentication fields (NextAuth.js compatibility)
+  password                String?   // Hashed password for credentials login
+  emailVerified           DateTime?
+  image                   String?
+
+  // User preferences and settings
+  timezone                String?  @default("UTC")
+  locale                  String?  @default("en")
+
+  // Healthcare-specific fields
+  employeeId              String?  @unique
+  department              String?
+  jobTitle                String?
+
+  // User status and permissions
+  isActive                Boolean  @default(true)
+  role                    UserRole @default(SUPPORT_STAFF)
+
+  // Security and compliance
+  lastLoginAt             DateTime?
+  lastPasswordChange      DateTime?
+  failedLoginAttempts     Int?     @default(0)
+  accountLockedUntil      DateTime?
+
+  // HIPAA training and compliance
+  hipaaTrainingDate       DateTime?
+  hipaaTrainingExpiry     DateTime?
+  canAccessPHI            Boolean  @default(false)
+  accessLevel             AccessLevel @default(BASIC)
+
+  // Audit trail
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  // Healthcare relationships
+  patients                Patient[]
+  familyMembers           FamilyMember[]
+  treatmentPlans          TreatmentPlan[]
+  serviceEpisodes         ServiceEpisode[]
+  auditLogs               AuditLog[]
+
+  // Provider profile relationship
+  providerProfile         Provider?
+
+  // NextAuth.js required relationships
+  accounts                Account[]
+  sessions                Session[]
+
+  // Custom field ownerships
+  patientCustomFields     PatientCustomField[]
+  familyMemberCustomFields FamilyMemberCustomField[]
+  treatmentPlanCustomFields TreatmentPlanCustomField[]
+
+  // Saved filters and usage tracking
+  savedFilters            SavedFilter[] @relation("UserSavedFilters")
+  filterUsage             SavedFilterUsage[] @relation("UserFilterUsage")
+
+  @@index([email]) // Authentication lookups
+  @@index([isActive]) // Active user filtering
+  @@index([role]) // Permission checks
+  @@index([employeeId]) // Employee ID lookup
+  @@index([canAccessPHI]) // HIPAA compliance filtering
+  @@map("users")
+}
+
+// ============================================================================
+// AUTHENTICATION MODELS (NextAuth.js compatibility)
+// ============================================================================
+model Account {
+  id                String  @id @default(uuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================================================================
+// CUSTOM FIELDS SYSTEM (Healthcare-Adapted)
+// Flexible field extensions for healthcare requirements
+// ============================================================================
+model PatientCustomField {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  fieldName String
+  fieldValue String?
+  fieldType CustomFieldType @default(TEXT)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ownerId   String?
+  owner     User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  @@index([patientId])
+  @@index([fieldName])
+  @@map("patient_custom_fields")
+}
+
+model FamilyMemberCustomField {
+  id             String       @id @default(uuid())
+  familyMemberId String
+  familyMember   FamilyMember @relation(fields: [familyMemberId], references: [id], onDelete: Cascade)
+
+  fieldName String
+  fieldValue String?
+  fieldType CustomFieldType @default(TEXT)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ownerId   String?
+  owner     User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  @@index([familyMemberId])
+  @@index([fieldName])
+  @@map("family_member_custom_fields")
+}
+
+model TreatmentPlanCustomField {
+  id              String        @id @default(uuid())
+  treatmentPlanId String
+  treatmentPlan   TreatmentPlan @relation(fields: [treatmentPlanId], references: [id], onDelete: Cascade)
+
+  fieldName String
+  fieldValue String?
+  fieldType CustomFieldType @default(TEXT)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ownerId   String?
+  owner     User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  @@index([treatmentPlanId])
+  @@index([fieldName])
+  @@map("treatment_plan_custom_fields")
+}
+
+// ============================================================================
+// HEALTHCARE-SPECIFIC ENUMS
+// Standardized values for healthcare operations and compliance
+// ============================================================================
+
+enum Gender {
+  MALE
+  FEMALE
+  NON_BINARY
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum PatientStatus {
+  ACTIVE          // Currently receiving treatment
+  INACTIVE        // Not currently in treatment
+  WAITLIST        // Waiting for services
+  DISCHARGED      // Successfully completed treatment
+  TRANSFERRED     // Transferred to another provider/location
+  DECEASED        // Deceased
+}
+
+enum RiskLevel {
+  LOW
+  MODERATE
+  HIGH
+  CRITICAL
+}
+
+enum RelationshipType {
+  SPOUSE
+  PARENT
+  CHILD
+  SIBLING
+  GRANDPARENT
+  GRANDCHILD
+  GUARDIAN
+  FRIEND
+  CAREGIVER
+  OTHER
+}
+
+enum ContactMethod {
+  PHONE
+  MOBILE
+  EMAIL
+  TEXT_MESSAGE
+  MAIL
+  IN_PERSON
+}
+
+enum ContactStatus {
+  ACTIVE
+  INACTIVE
+  DO_NOT_CONTACT
+  EMERGENCY_ONLY
+}
+
+enum TreatmentType {
+  INDIVIDUAL_THERAPY
+  GROUP_THERAPY
+  FAMILY_THERAPY
+  COUPLES_THERAPY
+  MEDICATION_MANAGEMENT
+  CASE_MANAGEMENT
+  ASSESSMENT
+  CRISIS_INTERVENTION
+  COMMUNITY_EDUCATION
+  PREVENTION_SERVICES
+}
+
+enum TreatmentStatus {
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  DISCONTINUED
+  TRANSFERRED
+}
+
+enum ServiceType {
+  INTAKE_ASSESSMENT
+  INDIVIDUAL_COUNSELING
+  GROUP_COUNSELING
+  FAMILY_THERAPY
+  MEDICATION_CONSULTATION
+  CASE_MANAGEMENT
+  CRISIS_SESSION
+  COMMUNITY_EDUCATION
+  PREVENTION_WORKSHOP
+  FOLLOW_UP
+  DISCHARGE_PLANNING
+}
+
+enum EpisodeStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  NO_SHOW
+  CANCELLED
+  RESCHEDULED
+}
+
+enum DeliveryMethod {
+  IN_PERSON
+  TELEHEALTH
+  PHONE
+  HOME_VISIT
+  COMMUNITY_BASED
+}
+
+enum LocationType {
+  MAIN_CENTER
+  SATELLITE_OFFICE
+  COMMUNITY_SITE
+  TELEHEALTH_ONLY
+  MOBILE_UNIT
+}
+
+enum EmploymentStatus {
+  ACTIVE
+  INACTIVE
+  ON_LEAVE
+  TERMINATED
+  RETIRED
+}
+
+enum AppointmentType {
+  INITIAL_ASSESSMENT
+  THERAPY_SESSION
+  MEDICATION_REVIEW
+  CASE_MANAGEMENT
+  CRISIS_APPOINTMENT
+  GROUP_SESSION
+  FAMILY_SESSION
+  FOLLOW_UP
+  DISCHARGE_MEETING
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  CHECKED_IN
+  IN_PROGRESS
+  COMPLETED
+  NO_SHOW
+  CANCELLED
+  RESCHEDULED
+}
+
+enum ConfirmationStatus {
+  PENDING
+  CONFIRMED
+  DECLINED
+  NO_RESPONSE
+}
+
+enum AuditAction {
+  CREATE
+  READ
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  EXPORT
+  PRINT
+  SEARCH
+  VIEW_PHI
+  MODIFY_PHI
+  ACCESS_DENIED
+}
+
+enum AccessType {
+  TREATMENT_RELATED
+  EMERGENCY_ACCESS
+  ADMINISTRATIVE
+  AUDIT_REVIEW
+  SYSTEM_MAINTENANCE
+  AUTHORIZED_DISCLOSURE
+}
+
+enum AuditReviewStatus {
+  PENDING
+  APPROVED
+  FLAGGED_FOR_REVIEW
+  VIOLATION_IDENTIFIED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+  CRITICAL
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  PROVIDER
+  SUPPORT_STAFF
+  VIEWER
+  AUDITOR
+}
+
+enum AccessLevel {
+  BASIC           // Limited access
+  STANDARD        // Full access to assigned patients
+  ELEVATED        // Access to all patients at location
+  ADMINISTRATOR   // Full system access
+  AUDITOR         // Read-only access for compliance
+}
+
+enum CustomFieldType {
+  TEXT
+  NUMBER
+  DATE
+  BOOLEAN
+  URL
+  EMAIL
+  PHONE
+  TEXTAREA
+  SELECT
+  MULTI_SELECT
+}
+
+// ============================================================================
+// SAVED FILTERS (Healthcare-Adapted)
+// User-defined filter configurations for patient/provider searches
+// ============================================================================
+model SavedFilter {
+  id           String   @id @default(uuid())
+  name         String
+  description  String?
+  entity       FilterEntity // Which healthcare entity this filter applies to
+
+  // Filter configuration (stored as JSON)
+  filterConfig Json
+
+  // Visibility and usage
+  isPublic     Boolean  @default(false)
+  isDefault    Boolean  @default(false)
+  tags         String?  // For categorization and search (comma-separated)
+
+  // Usage analytics
+  useCount     Int      @default(0)
+  lastUsedAt   DateTime?
+
+  // Audit trail
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // User ownership
+  ownerId      String?
+  owner        User?    @relation("UserSavedFilters", fields: [ownerId], references: [id], onDelete: SetNull)
+
+  // Usage statistics relationship
+  usageStats   SavedFilterUsage[]
+
+  // Indexes for performance
+  @@index([entity]) // Filter by entity type
+  @@index([ownerId]) // User's filters
+  @@index([isPublic]) // Public filters
+  @@index([isDefault]) // Default filters
+  @@index([name]) // Search by name
+  @@map("saved_filters")
+}
+
+// ============================================================================
+// SAVED FILTER USAGE TRACKING
+// Track when and how often saved filters are used
+// ============================================================================
+model SavedFilterUsage {
+  id             String      @id @default(uuid())
+  savedFilterId  String
+  savedFilter    SavedFilter @relation(fields: [savedFilterId], references: [id], onDelete: Cascade)
+
+  // Usage context
+  userId         String?
+  user           User?       @relation("UserFilterUsage", fields: [userId], references: [id], onDelete: SetNull)
+
+  // Usage metadata
+  executionTime  Int?        // Query execution time in milliseconds
+  resultCount    Int?        // Number of results returned
+  usedAt         DateTime    @default(now())
+
+  @@index([savedFilterId]) // Filter usage by saved filter
+  @@index([userId]) // User's filter usage
+  @@index([usedAt]) // Time-based analysis
+  @@map("saved_filter_usage")
+}
+
+enum FilterEntity {
+  PATIENTS
+  FAMILY_MEMBERS
+  TREATMENT_PLANS
+  SERVICE_EPISODES
+  PROVIDERS
+  APPOINTMENTS
+}

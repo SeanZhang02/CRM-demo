@@ -1,0 +1,681 @@
+# APCTC Healthcare Monitoring Stack
+# HIPAA-Compliant Monitoring and Alerting Infrastructure
+# 24/7 Healthcare Operations Center Configuration
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: healthcare-monitoring
+  labels:
+    name: healthcare-monitoring
+    purpose: observability
+    compliance: hipaa
+
+---
+# Prometheus Configuration for Healthcare Metrics
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-healthcare-config
+  namespace: healthcare-monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'apctc-healthcare'
+        environment: 'production'
+        compliance: 'hipaa'
+
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+
+    scrape_configs:
+      # Healthcare Application Metrics
+      - job_name: 'healthcare-app'
+        scrape_interval: 30s
+        metrics_path: '/api/metrics'
+        static_configs:
+          - targets: ['apctc-healthcare-service.apctc-healthcare:3000']
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            regex: 'phi_.*'
+            target_label: 'data_classification'
+            replacement: 'protected_health_information'
+
+      # Kubernetes Cluster Metrics
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - apctc-healthcare
+                - healthcare-monitoring
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+
+      # PostgreSQL Database Metrics
+      - job_name: 'postgresql-healthcare'
+        scrape_interval: 30s
+        static_configs:
+          - targets: ['postgres-exporter.healthcare-monitoring:9187']
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            regex: 'pg_database_size_bytes'
+            target_label: 'data_type'
+            replacement: 'healthcare_database'
+
+      # Redis Cache Metrics
+      - job_name: 'redis-healthcare'
+        scrape_interval: 30s
+        static_configs:
+          - targets: ['redis-exporter.healthcare-monitoring:9121']
+
+      # Node Exporter for Infrastructure
+      - job_name: 'node-exporter'
+        scrape_interval: 30s
+        static_configs:
+          - targets: ['node-exporter.healthcare-monitoring:9100']
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager.healthcare-monitoring:9093
+
+  healthcare-alerts.yml: |
+    groups:
+    - name: healthcare.patient.safety
+      rules:
+      - alert: HealthcareSystemDown
+        expr: up{job="healthcare-app"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          patient_safety: "true"
+          hipaa_incident: "true"
+        annotations:
+          summary: "PATIENT SAFETY ALERT: Healthcare system is down"
+          description: "Healthcare application is not responding. Patient care may be impacted."
+          runbook_url: "https://runbooks.apctc.org/system-down"
+
+      - alert: DatabaseConnectionLoss
+        expr: pg_up{job="postgresql-healthcare"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          patient_safety: "true"
+        annotations:
+          summary: "Database connection lost - Patient data inaccessible"
+          description: "PostgreSQL database is not accessible. Patient records unavailable."
+
+      - alert: SlowPatientSearch
+        expr: histogram_quantile(0.95, patient_search_duration_seconds_bucket) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          clinical_impact: "high"
+        annotations:
+          summary: "Patient search performance degraded"
+          description: "95th percentile patient search time is {{ $value }}s"
+
+    - name: healthcare.security
+      rules:
+      - alert: UnauthorizedPHIAccess
+        expr: increase(phi_access_denied_total[5m]) > 10
+        for: 1m
+        labels:
+          severity: critical
+          security_incident: "true"
+          hipaa_violation: "potential"
+        annotations:
+          summary: "SECURITY ALERT: Multiple PHI access denials detected"
+          description: "{{ $value }} unauthorized PHI access attempts in 5 minutes"
+
+      - alert: FailedLoginAttempts
+        expr: increase(authentication_failures_total[5m]) > 20
+        for: 2m
+        labels:
+          severity: warning
+          security_incident: "true"
+        annotations:
+          summary: "Multiple failed login attempts detected"
+          description: "{{ $value }} failed login attempts in 5 minutes"
+
+      - alert: AuditLogFailure
+        expr: increase(audit_log_errors_total[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+          compliance_issue: "true"
+          hipaa_violation: "true"
+        annotations:
+          summary: "COMPLIANCE ALERT: Audit logging failure"
+          description: "Audit log system is not functioning properly"
+
+    - name: healthcare.performance
+      rules:
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, http_request_duration_seconds_bucket{job="healthcare-app"}) > 2
+        for: 10m
+        labels:
+          severity: warning
+          performance_impact: "high"
+        annotations:
+          summary: "API response time degraded"
+          description: "95th percentile response time is {{ $value }}s"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is above 85%"
+
+      - alert: DatabaseSlowQueries
+        expr: pg_stat_activity_max_tx_duration{job="postgresql-healthcare"} > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow database queries detected"
+          description: "Database queries taking longer than 30 seconds"
+
+---
+# Alertmanager Configuration for Healthcare
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-healthcare-config
+  namespace: healthcare-monitoring
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'localhost:587'
+      smtp_from: 'alerts@apctc.org'
+      smtp_auth_username: 'alerts@apctc.org'
+      smtp_auth_password: 'smtp_password'
+
+    route:
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'healthcare-ops'
+      routes:
+      - match:
+          patient_safety: "true"
+        receiver: 'patient-safety-critical'
+        group_wait: 0s
+        repeat_interval: 5m
+      - match:
+          security_incident: "true"
+        receiver: 'security-team'
+        group_wait: 0s
+        repeat_interval: 10m
+      - match:
+          hipaa_violation: "true"
+        receiver: 'compliance-team'
+        group_wait: 0s
+        repeat_interval: 5m
+
+    receivers:
+    - name: 'patient-safety-critical'
+      pagerduty_configs:
+      - routing_key: 'PATIENT_SAFETY_PAGERDUTY_KEY'
+        description: 'Patient Safety Critical Alert: {{ .GroupLabels.alertname }}'
+        severity: 'critical'
+        client: 'APCTC Healthcare Portal'
+        client_url: 'https://portal.apctc.org'
+      slack_configs:
+      - api_url: 'SLACK_WEBHOOK_URL'
+        channel: '#patient-safety-alerts'
+        title: '🚨 PATIENT SAFETY CRITICAL ALERT'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        color: 'danger'
+      email_configs:
+      - to: 'ciso@apctc.org,cmo@apctc.org,cto@apctc.org'
+        subject: 'URGENT: Patient Safety Alert - {{ .GroupLabels.alertname }}'
+        body: |
+          Patient Safety Critical Alert
+
+          Alert: {{ .GroupLabels.alertname }}
+          Severity: {{ .CommonLabels.severity }}
+
+          {{ range .Alerts }}
+          Summary: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          {{ end }}
+
+    - name: 'security-team'
+      pagerduty_configs:
+      - routing_key: 'SECURITY_PAGERDUTY_KEY'
+        description: 'Security Incident: {{ .GroupLabels.alertname }}'
+        severity: 'critical'
+      slack_configs:
+      - api_url: 'SLACK_WEBHOOK_URL'
+        channel: '#security-incidents'
+        title: '🔒 SECURITY INCIDENT ALERT'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        color: 'warning'
+
+    - name: 'compliance-team'
+      email_configs:
+      - to: 'compliance@apctc.org,privacy-officer@apctc.org,legal@apctc.org'
+        subject: 'HIPAA COMPLIANCE ALERT: {{ .GroupLabels.alertname }}'
+        body: |
+          HIPAA Compliance Alert
+
+          This alert indicates a potential HIPAA compliance violation.
+          Immediate investigation and documentation required.
+
+          Alert: {{ .GroupLabels.alertname }}
+          {{ range .Alerts }}
+          Summary: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          {{ end }}
+
+    - name: 'healthcare-ops'
+      slack_configs:
+      - api_url: 'SLACK_WEBHOOK_URL'
+        channel: '#healthcare-ops'
+        title: 'Healthcare Operations Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+
+---
+# Grafana Dashboard Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-healthcare-dashboards
+  namespace: healthcare-monitoring
+data:
+  healthcare-operations-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "APCTC Healthcare Operations Dashboard",
+        "tags": ["healthcare", "hipaa", "patient-safety"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Patient Safety Indicators",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "up{job=\"healthcare-app\"}",
+                "legendFormat": "System Availability"
+              },
+              {
+                "expr": "histogram_quantile(0.95, patient_search_duration_seconds_bucket)",
+                "legendFormat": "Patient Search Time (95th %)"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"color": "red", "value": 0},
+                    {"color": "yellow", "value": 0.8},
+                    {"color": "green", "value": 0.95}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 2,
+            "title": "HIPAA Compliance Metrics",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "increase(phi_access_total[24h])",
+                "legendFormat": "PHI Access Events (24h)"
+              },
+              {
+                "expr": "increase(audit_log_entries_total[24h])",
+                "legendFormat": "Audit Log Entries (24h)"
+              },
+              {
+                "expr": "increase(authentication_failures_total[24h])",
+                "legendFormat": "Failed Logins (24h)"
+              }
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Clinical Workflow Performance",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{job=\"healthcare-app\"}[5m])",
+                "legendFormat": "Request Rate"
+              },
+              {
+                "expr": "histogram_quantile(0.95, http_request_duration_seconds_bucket{job=\"healthcare-app\"})",
+                "legendFormat": "Response Time (95th %)"
+              }
+            ]
+          },
+          {
+            "id": 4,
+            "title": "Provider Activity",
+            "type": "heatmap",
+            "targets": [
+              {
+                "expr": "increase(user_sessions_total[1h])",
+                "legendFormat": "Active Sessions"
+              }
+            ]
+          },
+          {
+            "id": 5,
+            "title": "Security Events",
+            "type": "logs",
+            "targets": [
+              {
+                "expr": "{job=\"healthcare-app\"} |~ \"security|auth|failed|unauthorized\"",
+                "legendFormat": "Security Logs"
+              }
+            ]
+          }
+        ],
+        "time": {
+          "from": "now-24h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }
+
+  compliance-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "HIPAA Compliance Dashboard",
+        "tags": ["compliance", "hipaa", "audit"],
+        "panels": [
+          {
+            "id": 1,
+            "title": "Data Access Audit Trail",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "increase(phi_data_access_total[1h]) by (user, action, patient_id)",
+                "legendFormat": "PHI Access by User"
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "title": "Encryption Status",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "encryption_status{type=\"phi\"}",
+                "legendFormat": "PHI Encryption Status"
+              },
+              {
+                "expr": "encryption_status{type=\"database\"}",
+                "legendFormat": "Database Encryption Status"
+              }
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Backup Compliance",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "time() - backup_last_success_timestamp",
+                "legendFormat": "Time Since Last Backup"
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+---
+# Security Monitoring Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: security-monitoring-config
+  namespace: healthcare-monitoring
+data:
+  falco-rules.yaml: |
+    # HIPAA-specific security rules for Falco
+    - rule: Unauthorized PHI File Access
+      desc: Detect unauthorized access to PHI files
+      condition: >
+        open_read and
+        fd.name contains "/app/data/phi/" and
+        not proc.name in (healthcare-app, postgres, backup-service)
+      output: >
+        Unauthorized PHI file access (user=%user.name command=%proc.cmdline
+        file=%fd.name container_id=%container.id)
+      priority: CRITICAL
+      tags: [hipaa, phi, unauthorized_access]
+
+    - rule: Database Connection from Unauthorized Process
+      desc: Detect database connections from unauthorized processes
+      condition: >
+        outbound and
+        fd.sport=5432 and
+        not proc.name in (healthcare-app, pg_dump, psql)
+      output: >
+        Unauthorized database connection (user=%user.name command=%proc.cmdline
+        connection=%fd.name container_id=%container.id)
+      priority: CRITICAL
+      tags: [database, unauthorized_access]
+
+    - rule: Audit Log Tampering
+      desc: Detect attempts to modify audit logs
+      condition: >
+        open_write and
+        fd.name contains "/app/logs/audit/" and
+        not proc.name in (fluentd, audit-logger)
+      output: >
+        Audit log tampering detected (user=%user.name command=%proc.cmdline
+        file=%fd.name container_id=%container.id)
+      priority: CRITICAL
+      tags: [audit, tampering, compliance]
+
+  wazuh-rules.xml: |
+    <!-- HIPAA Compliance Rules for Wazuh -->
+    <group name="hipaa,compliance">
+      <rule id="100001" level="12">
+        <if_sid>5716</if_sid>
+        <regex>PHI_ACCESS</regex>
+        <description>PHI data access detected</description>
+        <group>hipaa,phi_access</group>
+      </rule>
+
+      <rule id="100002" level="15">
+        <if_sid>5716</if_sid>
+        <regex>UNAUTHORIZED_PHI_ACCESS</regex>
+        <description>Unauthorized PHI data access attempt</description>
+        <group>hipaa,unauthorized_access,critical</group>
+      </rule>
+
+      <rule id="100003" level="12">
+        <if_sid>5503</if_sid>
+        <regex>LOGIN_SUCCESS.*healthcare</regex>
+        <description>Healthcare provider login successful</description>
+        <group>authentication,healthcare,success</group>
+      </rule>
+
+      <rule id="100004" level="10">
+        <if_sid>5503</if_sid>
+        <regex>LOGIN_FAILED.*healthcare</regex>
+        <description>Healthcare provider login failed</description>
+        <group>authentication,healthcare,failure</group>
+      </rule>
+    </group>
+
+---
+# Log Aggregation Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-healthcare-config
+  namespace: healthcare-monitoring
+data:
+  fluent.conf: |
+    # Healthcare Application Logs
+    <source>
+      @type tail
+      @id healthcare_app_logs
+      path /app/logs/healthcare/*.log
+      pos_file /var/log/fluentd-healthcare.log.pos
+      tag healthcare.app
+      <parse>
+        @type json
+        time_key timestamp
+        time_format %Y-%m-%dT%H:%M:%S.%LZ
+      </parse>
+    </source>
+
+    # Audit Logs (HIPAA Required)
+    <source>
+      @type tail
+      @id audit_logs
+      path /app/logs/audit/*.log
+      pos_file /var/log/fluentd-audit.log.pos
+      tag healthcare.audit
+      <parse>
+        @type json
+        time_key timestamp
+        time_format %Y-%m-%dT%H:%M:%S.%LZ
+      </parse>
+    </source>
+
+    # Security Logs
+    <source>
+      @type tail
+      @id security_logs
+      path /app/logs/security/*.log
+      pos_file /var/log/fluentd-security.log.pos
+      tag healthcare.security
+      <parse>
+        @type json
+        time_key timestamp
+        time_format %Y-%m-%dT%H:%M:%S.%LZ
+      </parse>
+    </source>
+
+    # PHI Access Logs (Special Handling)
+    <filter healthcare.app>
+      @type grep
+      <regexp>
+        key message
+        pattern PHI_ACCESS
+      </regexp>
+      @label @PHI_PROCESSING
+    </filter>
+
+    <label @PHI_PROCESSING>
+      <filter healthcare.app>
+        @type record_transformer
+        <record>
+          data_classification "PHI"
+          retention_period "7_years"
+          compliance_framework "HIPAA"
+          requires_encryption "true"
+        </record>
+      </filter>
+
+      <match healthcare.app>
+        @type s3
+        s3_bucket hipaa-compliance-logs
+        s3_region us-east-1
+        path healthcare/phi-access-logs/
+        time_slice_format %Y/%m/%d/%H
+        s3_object_key_format %{path}%{time_slice}_%{index}.log
+        store_as gzip_command
+        <inject>
+          time_key timestamp
+          time_type string
+          time_format %Y-%m-%dT%H:%M:%S.%LZ
+        </inject>
+        <server_side_encryption>
+          sse_algorithm aws:kms
+          sse_kms_key_id arn:aws:kms:us-east-1:ACCOUNT:key/KEY-ID
+        </server_side_encryption>
+      </match>
+    </label>
+
+    # Standard Application Logs
+    <match healthcare.app>
+      @type elasticsearch
+      host elasticsearch.healthcare-monitoring
+      port 9200
+      index_name healthcare-app
+      type_name _doc
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/healthcare-app
+        flush_mode interval
+        flush_interval 30s
+        chunk_limit_size 10MB
+        queue_limit_length 32
+        retry_forever true
+        retry_wait 1s
+      </buffer>
+    </match>
+
+    # Audit Logs (Long-term Storage)
+    <match healthcare.audit>
+      @type s3
+      s3_bucket hipaa-audit-logs
+      s3_region us-east-1
+      path healthcare/audit-logs/
+      time_slice_format %Y/%m/%d/%H
+      s3_object_key_format %{path}%{time_slice}_%{index}.log
+      store_as gzip_command
+      <inject>
+        time_key timestamp
+        time_type string
+        time_format %Y-%m-%dT%H:%M:%S.%LZ
+      </inject>
+      <server_side_encryption>
+        sse_algorithm aws:kms
+        sse_kms_key_id arn:aws:kms:us-east-1:ACCOUNT:key/KEY-ID
+      </server_side_encryption>
+    </match>
+
+    # Security Logs (Immediate Processing)
+    <match healthcare.security>
+      @type copy
+      <store>
+        @type elasticsearch
+        host elasticsearch.healthcare-monitoring
+        port 9200
+        index_name healthcare-security
+        type_name _doc
+      </store>
+      <store>
+        @type slack
+        webhook_url SECURITY_SLACK_WEBHOOK
+        channel security-alerts
+        username FluentdBot
+        color danger
+        message Securityevent: %s
+        message_keys message
+      </store>
+    </match>

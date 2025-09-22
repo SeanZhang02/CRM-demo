@@ -1,0 +1,317 @@
+# Artillery Load Testing Configuration
+# Tests CRM performance under realistic user loads
+
+config:
+  target: 'http://localhost:3000'
+
+  # Test phases simulating different load scenarios
+  phases:
+    # Warm-up phase
+    - duration: 60
+      arrivalRate: 2
+      name: "Warm-up"
+
+    # Normal business hours load
+    - duration: 300
+      arrivalRate: 10
+      name: "Normal Load"
+
+    # Peak usage periods
+    - duration: 120
+      arrivalRate: 25
+      name: "Peak Load"
+
+    # Stress testing
+    - duration: 60
+      arrivalRate: 50
+      name: "Stress Test"
+
+    # Cool-down
+    - duration: 60
+      arrivalRate: 5
+      name: "Cool-down"
+
+  # Default request configuration
+  defaults:
+    headers:
+      'Content-Type': 'application/json'
+      'User-Agent': 'Artillery Load Test'
+
+  # Environment variables for test configuration
+  environments:
+    local:
+      target: 'http://localhost:3000'
+      phases:
+        - duration: 30
+          arrivalRate: 5
+    staging:
+      target: 'https://staging.crm-app.com'
+    production:
+      target: 'https://app.crm-system.com'
+
+  # Performance thresholds
+  ensure:
+    # Response time requirements
+    p95: 500  # 95% of requests under 500ms
+    p99: 1000 # 99% of requests under 1s
+
+    # Error rate requirements
+    maxErrorRate: 1   # Less than 1% error rate
+
+  # Test data generation
+  payload:
+    - path: './test-data/companies.json'
+      fields:
+        - 'companyName'
+        - 'industry'
+        - 'website'
+    - path: './test-data/contacts.json'
+      fields:
+        - 'firstName'
+        - 'lastName'
+        - 'email'
+
+# Test scenarios representing real user workflows
+scenarios:
+  # Primary workflow: Company management (70% of traffic)
+  - name: "Company Management Workflow"
+    weight: 70
+    flow:
+      # Authentication
+      - post:
+          url: "/api/auth/signin"
+          json:
+            email: "loadtest{{ $randomInt(1, 1000) }}@example.com"
+            password: "LoadTest123!"
+          capture:
+            - json: "$.sessionToken"
+              as: "authToken"
+
+      # Dashboard overview
+      - get:
+          url: "/api/dashboard/stats"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+
+      # List companies with pagination
+      - get:
+          url: "/api/companies"
+          qs:
+            page: "{{ $randomInt(1, 5) }}"
+            limit: "20"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+
+      # Search companies
+      - get:
+          url: "/api/companies"
+          qs:
+            search: "{{ companyName }}"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+
+      # Create new company
+      - post:
+          url: "/api/companies"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          json:
+            name: "Load Test {{ companyName }} {{ $randomInt(1, 10000) }}"
+            industry: "{{ industry }}"
+            website: "{{ website }}"
+            status: "ACTIVE"
+            employeeCount: "{{ $randomInt(10, 1000) }}"
+          capture:
+            - json: "$.data.id"
+              as: "companyId"
+
+      # View company details
+      - get:
+          url: "/api/companies/{{ companyId }}"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+
+      # Update company
+      - put:
+          url: "/api/companies/{{ companyId }}"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          json:
+            name: "Updated {{ companyName }}"
+            status: "CUSTOMER"
+
+      # Think time between operations
+      - think: "{{ $randomInt(2, 8) }}"
+
+  # Contact management workflow (20% of traffic)
+  - name: "Contact Management Workflow"
+    weight: 20
+    flow:
+      # Authentication
+      - post:
+          url: "/api/auth/signin"
+          json:
+            email: "loadtest{{ $randomInt(1, 1000) }}@example.com"
+            password: "LoadTest123!"
+          capture:
+            - json: "$.sessionToken"
+              as: "authToken"
+
+      # List companies for contact association
+      - get:
+          url: "/api/companies"
+          qs:
+            limit: "10"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          capture:
+            - json: "$.data[0].id"
+              as: "companyId"
+
+      # List contacts
+      - get:
+          url: "/api/contacts"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+
+      # Create new contact
+      - post:
+          url: "/api/contacts"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          json:
+            firstName: "{{ firstName }}"
+            lastName: "{{ lastName }}"
+            email: "{{ email }}"
+            companyId: "{{ companyId }}"
+            jobTitle: "{{ $randomString() }}"
+          capture:
+            - json: "$.data.id"
+              as: "contactId"
+
+      # View contact details
+      - get:
+          url: "/api/contacts/{{ contactId }}"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+
+      - think: "{{ $randomInt(3, 10) }}"
+
+  # Deal management workflow (10% of traffic)
+  - name: "Deal Management Workflow"
+    weight: 10
+    flow:
+      # Authentication
+      - post:
+          url: "/api/auth/signin"
+          json:
+            email: "loadtest{{ $randomInt(1, 1000) }}@example.com"
+            password: "LoadTest123!"
+          capture:
+            - json: "$.sessionToken"
+              as: "authToken"
+
+      # Get prerequisites (company and contact)
+      - get:
+          url: "/api/companies"
+          qs:
+            limit: "5"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          capture:
+            - json: "$.data[0].id"
+              as: "companyId"
+
+      - get:
+          url: "/api/contacts"
+          qs:
+            companyId: "{{ companyId }}"
+            limit: "5"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          capture:
+            - json: "$.data[0].id"
+              as: "contactId"
+
+      # List deals
+      - get:
+          url: "/api/deals"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+
+      # Create new deal
+      - post:
+          url: "/api/deals"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          json:
+            title: "Load Test Deal {{ $randomInt(1, 10000) }}"
+            value: "{{ $randomInt(1000, 100000) }}"
+            companyId: "{{ companyId }}"
+            contactId: "{{ contactId }}"
+            status: "QUALIFIED"
+            probability: "{{ $randomInt(25, 95) }}"
+          capture:
+            - json: "$.data.id"
+              as: "dealId"
+
+      # Update deal stage
+      - put:
+          url: "/api/deals/{{ dealId }}"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          json:
+            status: "PROPOSAL"
+            probability: "{{ $randomInt(50, 100) }}"
+
+      - think: "{{ $randomInt(5, 15) }}"
+
+# Custom functions for realistic test data
+functions:
+  # Generate realistic company names
+  generateCompanyName: |
+    function(context, events, done) {
+      const prefixes = ['Acme', 'Global', 'Advanced', 'Premier', 'Elite', 'Pro', 'Smart', 'Digital'];
+      const suffixes = ['Corp', 'Inc', 'LLC', 'Solutions', 'Technologies', 'Systems', 'Group', 'Enterprises'];
+      const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+      const suffix = suffixes[Math.floor(Math.random() * suffixes.length)];
+      context.vars.companyName = `${prefix} ${suffix}`;
+      return done();
+    }
+
+  # Generate realistic person names
+  generatePersonName: |
+    function(context, events, done) {
+      const firstNames = ['John', 'Jane', 'Michael', 'Sarah', 'David', 'Lisa', 'Robert', 'Emily'];
+      const lastNames = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis'];
+      context.vars.firstName = firstNames[Math.floor(Math.random() * firstNames.length)];
+      context.vars.lastName = lastNames[Math.floor(Math.random() * lastNames.length)];
+      return done();
+    }
+
+# Before and after hooks
+before:
+  flow:
+    - log: "Starting CRM load test..."
+
+after:
+  flow:
+    - log: "Load test completed"
+
+# Plugins for enhanced reporting
+plugins:
+  # Metrics collection
+  metrics-by-endpoint:
+    useOnlyRequestNames: true
+
+  # Real-time monitoring
+  cloudwatch:
+    region: "us-east-1"
+    namespace: "CRM/LoadTest"
+
+  # Custom reporting
+  publish-metrics:
+    - type: "statsd"
+      host: "localhost"
+      port: 8125
+      prefix: "crm.loadtest"

@@ -1,0 +1,547 @@
+# APCTC Healthcare Provider Portal - Kubernetes Deployment
+# HIPAA-Compliant Production Infrastructure
+# Multi-AZ deployment with security hardening
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apctc-healthcare
+  labels:
+    name: apctc-healthcare
+    compliance: hipaa
+    environment: production
+    data-classification: phi
+  annotations:
+    security.alpha.kubernetes.io/sysctls: "net.core.somaxconn=32768"
+    scheduler.alpha.kubernetes.io/critical-pod: ""
+
+---
+# ConfigMap for Healthcare Application Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: healthcare-config
+  namespace: apctc-healthcare
+data:
+  NODE_ENV: "production"
+  HIPAA_COMPLIANCE: "true"
+  PHI_ENCRYPTION_ENABLED: "true"
+  AUDIT_LOGGING_ENABLED: "true"
+  SESSION_TIMEOUT: "900"
+  MAX_SESSION_DURATION: "28800"
+  FORCE_HTTPS: "true"
+  SECURE_COOKIES: "true"
+  LOG_LEVEL: "info"
+  POSTGRES_SSL_MODE: "require"
+  REDIS_TLS_ENABLED: "true"
+
+---
+# Secret for Healthcare Credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: healthcare-secrets
+  namespace: apctc-healthcare
+  annotations:
+    kubernetes.io/description: "HIPAA-compliant secrets for PHI data access"
+type: Opaque
+data:
+  # These values should be base64 encoded
+  DATABASE_URL: # postgresql://username:password@hostname:5432/database
+  REDIS_URL: # redis://username:password@hostname:6379
+  NEXTAUTH_SECRET: # 32-character random string
+  ENCRYPTION_KEY: # 32-character encryption key
+  PHI_ENCRYPTION_KEY: # 32-character PHI-specific encryption key
+  JWT_SECRET: # 32-character JWT signing key
+
+---
+# Persistent Volume Claim for Healthcare Data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: healthcare-data-pvc
+  namespace: apctc-healthcare
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "gp3-encrypted"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: gp3-encrypted
+
+---
+# Persistent Volume Claim for Audit Logs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audit-logs-pvc
+  namespace: apctc-healthcare
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "gp3-encrypted"
+    retention.policy: "7-years"
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: gp3-encrypted
+
+---
+# Network Policy for Healthcare Security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: healthcare-network-policy
+  namespace: apctc-healthcare
+spec:
+  podSelector:
+    matchLabels:
+      app: apctc-healthcare
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    - podSelector:
+        matchLabels:
+          app: healthcare-monitoring
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: rds-postgresql
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: elasticache-redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+# Pod Security Policy for Healthcare
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: healthcare-psp
+  namespace: apctc-healthcare
+  annotations:
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: 'runtime/default'
+    seccomp.security.alpha.kubernetes.io/defaultProfileName: 'runtime/default'
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  runAsGroup:
+    rule: 'MustRunAs'
+    ranges:
+      - min: 1001
+        max: 1001
+  seLinux:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+
+---
+# Service Account for Healthcare Application
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: healthcare-service-account
+  namespace: apctc-healthcare
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/ApctcHealthcareServiceRole
+automountServiceAccountToken: false
+
+---
+# Deployment for Healthcare Application
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apctc-healthcare-app
+  namespace: apctc-healthcare
+  labels:
+    app: apctc-healthcare
+    tier: application
+    compliance: hipaa
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: apctc-healthcare
+      tier: application
+  template:
+    metadata:
+      labels:
+        app: apctc-healthcare
+        tier: application
+        compliance: hipaa
+        data-classification: phi
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/api/metrics"
+    spec:
+      serviceAccountName: healthcare-service-account
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - apctc-healthcare
+            topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - m6i.large
+                - m6i.xlarge
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - us-east-1a
+                - us-east-1b
+                - us-east-1c
+      containers:
+      - name: healthcare-app
+        image: apctc/healthcare-portal:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-config
+              key: NODE_ENV
+        - name: HIPAA_COMPLIANCE
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-config
+              key: HIPAA_COMPLIANCE
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-secrets
+              key: DATABASE_URL
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-secrets
+              key: REDIS_URL
+        - name: NEXTAUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-secrets
+              key: NEXTAUTH_SECRET
+        - name: PHI_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-secrets
+              key: PHI_ENCRYPTION_KEY
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+            ephemeral-storage: "1Gi"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+            ephemeral-storage: "2Gi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+          runAsGroup: 1001
+          capabilities:
+            drop:
+              - ALL
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/ready
+            port: 3000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        volumeMounts:
+        - name: healthcare-data
+          mountPath: /app/data
+          readOnly: false
+        - name: audit-logs
+          mountPath: /app/logs
+          readOnly: false
+        - name: tmp-volume
+          mountPath: /tmp
+          readOnly: false
+        - name: var-cache
+          mountPath: /var/cache
+          readOnly: false
+      volumes:
+      - name: healthcare-data
+        persistentVolumeClaim:
+          claimName: healthcare-data-pvc
+      - name: audit-logs
+        persistentVolumeClaim:
+          claimName: audit-logs-pvc
+      - name: tmp-volume
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: var-cache
+        emptyDir:
+          sizeLimit: 1Gi
+      nodeSelector:
+        kubernetes.io/arch: amd64
+        node.kubernetes.io/instance-type: m6i.large
+      tolerations:
+      - key: "healthcare-workload"
+        operator: "Equal"
+        value: "hipaa"
+        effect: "NoSchedule"
+
+---
+# Service for Healthcare Application
+apiVersion: v1
+kind: Service
+metadata:
+  name: apctc-healthcare-service
+  namespace: apctc-healthcare
+  labels:
+    app: apctc-healthcare
+    tier: application
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-1:ACCOUNT:certificate/CERT-ID
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy: "ELBSecurityPolicy-TLS-1-2-2017-01"
+spec:
+  type: LoadBalancer
+  selector:
+    app: apctc-healthcare
+    tier: application
+  ports:
+  - name: https
+    port: 443
+    targetPort: 3000
+    protocol: TCP
+  - name: http
+    port: 80
+    targetPort: 3000
+    protocol: TCP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: apctc-healthcare-hpa
+  namespace: apctc-healthcare
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: apctc-healthcare-app
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: apctc-healthcare-pdb
+  namespace: apctc-healthcare
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: apctc-healthcare
+      tier: application
+
+---
+# Service Monitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: apctc-healthcare-metrics
+  namespace: apctc-healthcare
+  labels:
+    app: apctc-healthcare
+    team: healthcare-ops
+spec:
+  selector:
+    matchLabels:
+      app: apctc-healthcare
+  endpoints:
+  - port: http
+    path: /api/metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    scheme: http
+
+---
+# Ingress for External Access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: apctc-healthcare-ingress
+  namespace: apctc-healthcare
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-Frame-Options "DENY" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'" always;
+spec:
+  tls:
+  - hosts:
+    - healthcare.apctc.org
+    - portal.apctc.org
+    secretName: apctc-healthcare-tls
+  rules:
+  - host: healthcare.apctc.org
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: apctc-healthcare-service
+            port:
+              number: 80
+  - host: portal.apctc.org
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: apctc-healthcare-service
+            port:
+              number: 80

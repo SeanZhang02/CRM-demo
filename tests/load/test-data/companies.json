@@ -1,0 +1,52 @@
+[
+  {
+    "companyName": "Acme Corporation",
+    "industry": "Technology",
+    "website": "https://acme-corp.com"
+  },
+  {
+    "companyName": "Global Solutions Inc",
+    "industry": "Manufacturing",
+    "website": "https://global-solutions.com"
+  },
+  {
+    "companyName": "Premier Technologies",
+    "industry": "Technology",
+    "website": "https://premier-tech.com"
+  },
+  {
+    "companyName": "Elite Healthcare",
+    "industry": "Healthcare",
+    "website": "https://elite-health.com"
+  },
+  {
+    "companyName": "Smart Finance Group",
+    "industry": "Finance",
+    "website": "https://smart-finance.com"
+  },
+  {
+    "companyName": "Digital Marketing Pro",
+    "industry": "Media",
+    "website": "https://digital-marketing-pro.com"
+  },
+  {
+    "companyName": "Advanced Manufacturing",
+    "industry": "Manufacturing",
+    "website": "https://advanced-mfg.com"
+  },
+  {
+    "companyName": "Pro Consulting",
+    "industry": "Consulting",
+    "website": "https://pro-consulting.com"
+  },
+  {
+    "companyName": "Tech Innovations LLC",
+    "industry": "Technology",
+    "website": "https://tech-innovations.com"
+  },
+  {
+    "companyName": "Healthcare Systems",
+    "industry": "Healthcare",
+    "website": "https://healthcare-systems.com"
+  }
+]
