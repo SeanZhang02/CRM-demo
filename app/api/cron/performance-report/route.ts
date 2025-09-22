@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Monitor, MetricType } from '@/lib/monitoring';
-import { db } from '@/lib/database';
-import { cache } from '@/lib/cache';
 
 /**
  * Weekly Performance Report Cron Job
@@ -46,7 +44,7 @@ export async function POST(request: NextRequest) {
       databaseMetrics: await getDatabaseMetrics(),
 
       // Cache Performance
-      cacheMetrics: getCacheMetrics(),
+      cacheMetrics: await getCacheMetrics(),
 
       // User Activity (if available)
       userMetrics: await getUserActivityMetrics()
@@ -109,6 +107,7 @@ async function getSystemHealthReport() {
 
 async function getDatabaseMetrics() {
   try {
+    const { db } = await import('@/lib/database');
     const poolStats = await db.getPoolStats();
     const dbHealth = await db.health();
 
@@ -125,15 +124,20 @@ async function getDatabaseMetrics() {
   }
 }
 
-function getCacheMetrics() {
-  const stats = cache.getStats();
-  const hitRate = stats.total > 0 ? (stats.valid / stats.total * 100) : 0;
+async function getCacheMetrics() {
+  try {
+    const { cache } = await import('@/lib/cache');
+    const stats = cache.getStats();
+    const hitRate = stats.total > 0 ? (stats.valid / stats.total * 100) : 0;
 
-  return {
-    ...stats,
-    hitRate: Math.round(hitRate * 100) / 100,
-    efficiency: hitRate > 80 ? 'excellent' : hitRate > 60 ? 'good' : hitRate > 40 ? 'fair' : 'poor'
-  };
+    return {
+      ...stats,
+      hitRate: Math.round(hitRate * 100) / 100,
+      efficiency: hitRate > 80 ? 'excellent' : hitRate > 60 ? 'good' : hitRate > 40 ? 'fair' : 'poor'
+    };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
 }
 
 async function getUserActivityMetrics() {
